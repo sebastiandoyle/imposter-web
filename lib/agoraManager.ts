@@ -22,6 +22,7 @@ import {
   removePlayer,
   nextAvailableSlot,
 } from './gameTypes';
+import { getRTMManager, RTMManager } from './rtmManager';
 
 // Event types for state changes
 export type AgoraEvent =
@@ -40,7 +41,7 @@ let AgoraRTC: typeof import('agora-rtc-sdk-ng').default | null = null;
 export class AgoraManager {
   private client: IAgoraRTCClient | null = null;
   private localAudioTrack: IMicrophoneAudioTrack | null = null;
-  private dataStreamId: number | null = null; // ID returned by createDataStream
+  private rtmManager: RTMManager; // RTM for messaging
   private localPlayerName = '';
   private localFaceColorHex = '';
   private isHosting = false;
@@ -53,7 +54,8 @@ export class AgoraManager {
   private playerVolumes = new Map<number, number>();
 
   constructor() {
-    // Don't initialize Agora in constructor - do it lazily
+    // Initialize RTM manager
+    this.rtmManager = getRTMManager();
   }
 
   // Load AgoraRTC dynamically
@@ -106,7 +108,6 @@ export class AgoraManager {
       } catch (e) {
         console.log('Cleanup error (ignored):', e);
       }
-      this.dataStreamId = null;
       this.client = null;
     }
 
@@ -188,48 +189,19 @@ export class AgoraManager {
         this.recalculateQuickMatchHost();
       }
 
-      // Broadcast player left
+      // Broadcast player left via RTM
       this.sendMessage({ type: 'playerLeft', userId: uid });
-    });
-
-    // Listen for data stream messages from other clients
-    this.client.on('stream-message', (uid: number, data: Uint8Array) => {
-      console.log('[Agora] stream-message from:', uid, 'length:', data.length);
-      try {
-        const message = JSON.parse(new TextDecoder().decode(data)) as GameMessage;
-        console.log('[Agora] parsed message:', message.type);
-        this.handleIncomingMessage(message, uid);
-      } catch (error) {
-        console.error('Failed to parse stream message:', error);
-      }
     });
 
     // Start volume monitoring
     this.startVolumeMonitoring();
   }
 
-  // Create data stream for sending messages
-  private async createDataStream(): Promise<void> {
-    if (!this.client || this.dataStreamId !== null) return;
-
-    // Check what methods are available on the client for debugging
-    const client = this.client as unknown as Record<string, unknown>;
-    console.log('Checking data stream support...');
-
-    // Try createDataStream (standard Agora RTC API)
-    if (typeof client.createDataStream === 'function') {
-      try {
-        const createFn = client.createDataStream as (config: { ordered: boolean; reliable: boolean }) => Promise<number>;
-        this.dataStreamId = await createFn({ ordered: true, reliable: true });
-        console.log('Data stream created with ID:', this.dataStreamId);
-        return;
-      } catch (e) {
-        console.warn('createDataStream failed:', e);
-      }
-    }
-
-    // Data stream not available - sendMessage will silently no-op
-    console.log('Data stream API not available - game state sync disabled');
+  // Set up RTM message handler
+  private setupRTMMessageHandler(): void {
+    this.rtmManager.onMessage((message: GameMessage, fromUserId: string) => {
+      this.handleIncomingMessage(message, parseInt(fromUserId, 10));
+    });
   }
 
   private startVolumeMonitoring() {
@@ -276,9 +248,11 @@ export class AgoraManager {
 
   // Create a new room as host
   async createRoom(playerName: string): Promise<string> {
-    // Prevent multiple simultaneous connection attempts
+    // Prevent multiple simultaneous connection attempts (idempotent for React Strict Mode)
     if (this.isConnecting) {
-      throw new Error('Already connecting');
+      console.warn('[Agora] createRoom called while already connecting, ignoring duplicate call');
+      // Return existing room code if available, otherwise wait for connection
+      return this.roomState?.roomCode || 'WAIT';
     }
     this.isConnecting = true;
 
@@ -307,8 +281,10 @@ export class AgoraManager {
       // Publish audio track
       await this.client!.publish(this.localAudioTrack);
 
-      // Create data stream for messaging
-      await this.createDataStream();
+      // Set up RTM for messaging
+      await this.rtmManager.login(localUid);
+      await this.rtmManager.subscribe(channel);
+      this.setupRTMMessageHandler();
 
       // Create room state
       this.roomState = createRoomState(roomCode, localUid);
@@ -336,9 +312,10 @@ export class AgoraManager {
 
   // Join an existing room
   async joinRoom(code: string, playerName: string): Promise<void> {
-    // Prevent multiple simultaneous connection attempts
+    // Prevent multiple simultaneous connection attempts (idempotent for React Strict Mode)
     if (this.isConnecting) {
-      throw new Error('Already connecting');
+      console.warn('[Agora] joinRoom called while already connecting, ignoring duplicate call');
+      return;
     }
     this.isConnecting = true;
 
@@ -368,8 +345,10 @@ export class AgoraManager {
       // Publish audio track
       await this.client!.publish(this.localAudioTrack);
 
-      // Create data stream for messaging
-      await this.createDataStream();
+      // Set up RTM for messaging
+      await this.rtmManager.login(localUid);
+      await this.rtmManager.subscribe(channel);
+      this.setupRTMMessageHandler();
 
       // Create temporary room state (will be updated by host sync)
       this.roomState = createRoomState(code, 0);
@@ -417,9 +396,10 @@ export class AgoraManager {
 
   // Join quick match queue
   async joinQuickMatch(playerName: string): Promise<void> {
-    // Prevent multiple simultaneous connection attempts
+    // Prevent multiple simultaneous connection attempts (idempotent for React Strict Mode)
     if (this.isConnecting) {
-      throw new Error('Already connecting');
+      console.warn('[Agora] joinQuickMatch called while already connecting, ignoring duplicate call');
+      return;
     }
     this.isConnecting = true;
 
@@ -443,8 +423,10 @@ export class AgoraManager {
 
       await this.client!.publish(this.localAudioTrack);
 
-      // Create data stream for messaging
-      await this.createDataStream();
+      // Set up RTM for messaging
+      await this.rtmManager.login(localUid);
+      await this.rtmManager.subscribe(QUICK_MATCH_CHANNEL);
+      this.setupRTMMessageHandler();
 
       this.allConnectedUIDs.add(localUid);
 
@@ -475,6 +457,15 @@ export class AgoraManager {
         faceColorHex: colorHex,
       });
 
+      // Request state sync from host (to get info about existing players)
+      this.sendMessage({ type: 'requestSync' });
+
+      // Check for existing remote users already in the channel
+      // (user-joined only fires for users joining AFTER us)
+      setTimeout(() => {
+        this.addExistingRemoteUsers();
+      }, 1000);
+
       this.isConnecting = false;
       this.emit({ type: 'connected', roomState: this.roomState });
     } catch (error) {
@@ -489,8 +480,8 @@ export class AgoraManager {
     this.isConnecting = false; // Reset connection flag
     this.stopVolumeMonitoring();
 
-    // Reset data stream
-    this.dataStreamId = null;
+    // Logout from RTM
+    await this.rtmManager.logout();
 
     if (this.localAudioTrack) {
       this.localAudioTrack.close();
@@ -559,29 +550,9 @@ export class AgoraManager {
     this.sendStateSync();
   }
 
-  // Send a message via data stream to all other clients
+  // Send a message via RTM to all other clients
   private async sendMessage(message: GameMessage): Promise<void> {
-    if (!this.client || this.dataStreamId === null) {
-      // No client or data stream not available
-      return;
-    }
-
-    const client = this.client as unknown as {
-      sendStreamMessage?: (streamId: number, data: Uint8Array) => Promise<void>;
-    };
-
-    if (typeof client.sendStreamMessage !== 'function') {
-      return;
-    }
-
-    try {
-      const jsonStr = JSON.stringify(message);
-      const data = new TextEncoder().encode(jsonStr);
-      await client.sendStreamMessage(this.dataStreamId, data);
-    } catch (error) {
-      // Some errors are expected - log but don't throw
-      console.warn('sendMessage failed:', error);
-    }
+    await this.rtmManager.publish(message);
   }
 
   private sendStateSync(): void {
@@ -608,29 +579,53 @@ export class AgoraManager {
       case 'playerJoined': {
         let { slotIndex, faceColorHex } = message;
 
-        // Host assigns proper slot for all joining players
-        if (this.roomState.hostUserId === this.roomState.localUserId) {
-          const availableSlot = nextAvailableSlot(this.roomState);
-          if (availableSlot !== null) {
-            slotIndex = availableSlot;
-            faceColorHex = FACE_COLORS[slotIndex % FACE_COLORS.length];
+        // Check if placeholder player already exists (from RTC user-joined)
+        const existingPlayer = this.roomState.players.find(p => p.id === message.userId);
+
+        if (existingPlayer) {
+          // Update placeholder with real name from RTM message
+          console.log('[Agora] Updating placeholder player with real name:', message.name);
+          const updatedPlayers = this.roomState.players.map(p =>
+            p.id === message.userId
+              ? { ...p, name: message.name, faceColorHex: message.faceColorHex || p.faceColorHex }
+              : p
+          );
+          this.roomState = { ...this.roomState, players: updatedPlayers };
+
+          // Emit state sync to update UI
+          const updatedPlayer = updatedPlayers.find(p => p.id === message.userId)!;
+          this.emit({ type: 'stateSync', state: this.roomState });
+
+          // If host, broadcast the update to others
+          if (this.roomState.hostUserId === this.roomState.localUserId) {
+            this.sendStateSync();
           }
-        }
+        } else {
+          // No placeholder exists - add the player normally
+          // Host assigns proper slot for all joining players
+          if (this.roomState.hostUserId === this.roomState.localUserId) {
+            const availableSlot = nextAvailableSlot(this.roomState);
+            if (availableSlot !== null) {
+              slotIndex = availableSlot;
+              faceColorHex = FACE_COLORS[slotIndex % FACE_COLORS.length];
+            }
+          }
 
-        const player: Player = {
-          id: message.userId,
-          slotIndex,
-          name: message.name,
-          isConnected: true,
-          faceColorHex,
-        };
+          const player: Player = {
+            id: message.userId,
+            slotIndex,
+            name: message.name,
+            isConnected: true,
+            faceColorHex,
+          };
 
-        this.roomState = addPlayer(this.roomState, player);
-        this.emit({ type: 'playerJoined', player });
+          this.roomState = addPlayer(this.roomState, player);
+          this.emit({ type: 'playerJoined', player });
 
-        // If host, send state sync to update everyone with correct slots
-        if (this.roomState.hostUserId === this.roomState.localUserId) {
-          this.sendStateSync();
+          // If host, send state sync to update everyone with correct slots
+          if (this.roomState.hostUserId === this.roomState.localUserId) {
+            this.sendStateSync();
+          }
         }
 
         // Check auto-start for quick match

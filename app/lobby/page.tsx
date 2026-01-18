@@ -27,6 +27,7 @@ export default function Lobby() {
 
   // Initialize room on mount
   useEffect(() => {
+    console.log('[Lobby] Init useEffect: hasInitialized=' + hasInitialized);
     if (hasInitialized) return;
 
     const playerName = sessionStorage.getItem('playerName');
@@ -34,7 +35,10 @@ export default function Lobby() {
     const quickMatchFlag = sessionStorage.getItem('isQuickMatch') === 'true';
     const roomCode = sessionStorage.getItem('roomCode');
 
+    console.log('[Lobby] Session data: playerName=' + playerName + ', hostFlag=' + hostFlag + ', quickMatchFlag=' + quickMatchFlag + ', roomCode=' + roomCode);
+
     if (!playerName) {
+      console.log('[Lobby] No playerName, redirecting to home');
       router.push('/');
       return;
     }
@@ -43,26 +47,32 @@ export default function Lobby() {
     setIsQuickMatch(quickMatchFlag);
     setHasInitialized(true);
 
-    // Clear session storage
-    sessionStorage.removeItem('isQuickMatch');
+    // Don't clear isQuickMatch until after connection - prevents issues with remounts
+    // sessionStorage.removeItem('isQuickMatch');
 
     const initRoom = async () => {
       try {
         if (quickMatchFlag) {
+          console.log('[Lobby] Starting Quick Match for:', playerName);
           await joinQuickMatch(playerName);
           setDisplayRoomCode('QUICK');
+          // Clear isQuickMatch after successful connection
+          sessionStorage.removeItem('isQuickMatch');
         } else if (hostFlag) {
+          console.log('[Lobby] Creating room for host:', playerName);
           const code = await createRoom(playerName);
           setDisplayRoomCode(code);
         } else if (roomCode) {
+          console.log('[Lobby] Joining room:', roomCode);
           await joinRoom(roomCode, playerName);
           setDisplayRoomCode(roomCode);
           sessionStorage.removeItem('roomCode');
         } else {
+          console.log('[Lobby] No valid path, redirecting to home');
           router.push('/');
         }
       } catch (e) {
-        console.error('Failed to initialize room:', e);
+        console.error('[Lobby] Failed to initialize room:', e);
       }
     };
 
@@ -84,10 +94,21 @@ export default function Lobby() {
   }, [isConnected]);
 
   // Handle disconnection - only redirect if was previously connected
+  // Add a delay to avoid race conditions during connection setup
   useEffect(() => {
+    console.log('[Lobby] Connection state: hasInitialized=' + hasInitialized + ', wasConnected=' + wasConnected + ', isConnected=' + isConnected + ', error=' + error);
     if (hasInitialized && wasConnected && !isConnected && !error) {
-      // Was connected but now disconnected, go back home
-      router.push('/');
+      console.log('[Lobby] Detected disconnect, waiting before redirect...');
+      // Was connected but now disconnected - wait a moment to confirm
+      const timer = setTimeout(() => {
+        // Double-check still disconnected before redirecting
+        console.log('[Lobby] Redirect check - isConnected:', isConnected);
+        if (!isConnected) {
+          console.log('[Lobby] Redirecting to home due to disconnect');
+          router.push('/');
+        }
+      }, 500);
+      return () => clearTimeout(timer);
     }
   }, [isConnected, hasInitialized, wasConnected, error, router]);
 
