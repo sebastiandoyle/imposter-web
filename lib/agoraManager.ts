@@ -47,7 +47,6 @@ export class AgoraManager {
   private isHosting = false;
   private isQuickMatching = false;
   private isConnecting = false; // Prevent multiple simultaneous connection attempts
-  private dataStreamId: number | null = null; // For cross-platform messaging (iOS uses data streams)
   private allConnectedUIDs = new Set<number>();
   private roomState: RoomState | null = null;
   private listeners: ((event: AgoraEvent) => void)[] = [];
@@ -295,11 +294,6 @@ export class AgoraManager {
       // Publish audio track
       await this.client!.publish(this.localAudioTrack);
 
-      // Create data stream for cross-platform messaging (iOS uses data streams)
-      // Note: createDataStream exists at runtime but isn't in the TypeScript types
-      const clientAny = this.client as unknown as { createDataStream: (config: { ordered: boolean; reliable: boolean }) => Promise<number> };
-      this.dataStreamId = await clientAny.createDataStream({ ordered: true, reliable: true });
-
       // Set up RTM for messaging
       await this.rtmManager.login(localUid);
       await this.rtmManager.subscribe(channel);
@@ -363,11 +357,6 @@ export class AgoraManager {
 
       // Publish audio track
       await this.client!.publish(this.localAudioTrack);
-
-      // Create data stream for cross-platform messaging (iOS uses data streams)
-      // Note: createDataStream exists at runtime but isn't in the TypeScript types
-      const clientAny = this.client as unknown as { createDataStream: (config: { ordered: boolean; reliable: boolean }) => Promise<number> };
-      this.dataStreamId = await clientAny.createDataStream({ ordered: true, reliable: true });
 
       // Set up RTM for messaging
       await this.rtmManager.login(localUid);
@@ -447,11 +436,6 @@ export class AgoraManager {
 
       await this.client!.publish(this.localAudioTrack);
 
-      // Create data stream for cross-platform messaging (iOS uses data streams)
-      // Note: createDataStream exists at runtime but isn't in the TypeScript types
-      const clientAny = this.client as unknown as { createDataStream: (config: { ordered: boolean; reliable: boolean }) => Promise<number> };
-      this.dataStreamId = await clientAny.createDataStream({ ordered: true, reliable: true });
-
       // Set up RTM for messaging
       await this.rtmManager.login(localUid);
       await this.rtmManager.subscribe(QUICK_MATCH_CHANNEL);
@@ -526,7 +510,6 @@ export class AgoraManager {
     this.isHosting = false;
     this.isQuickMatching = false;
     this.allConnectedUIDs.clear();
-    this.dataStreamId = null; // Clean up data stream
 
     this.emit({ type: 'disconnected' });
   }
@@ -586,21 +569,20 @@ export class AgoraManager {
     await this.rtmManager.publish(message);
 
     // Also send via data stream (for cross-platform with iOS)
-    if (this.client && this.dataStreamId !== null) {
+    // Web SDK 4.x API: sendStreamMessage(payload) - no stream ID needed
+    if (this.client) {
       try {
         const jsonStr = JSON.stringify(message);
         console.log('[Agora] Sending data stream message:', jsonStr);
         const encoder = new TextEncoder();
         const data = encoder.encode(jsonStr);
-        // Note: sendStreamMessage exists at runtime but isn't in the TypeScript types
-        const clientAny = this.client as unknown as { sendStreamMessage: (streamId: number, data: Uint8Array) => void };
-        clientAny.sendStreamMessage(this.dataStreamId, data);
+        // TypeScript types are incomplete, but this method exists at runtime
+        const client = this.client as unknown as { sendStreamMessage: (data: Uint8Array) => Promise<void> };
+        await client.sendStreamMessage(data);
         console.log('[Agora] Data stream message sent successfully');
       } catch (e) {
         console.warn('[Agora] Failed to send data stream message:', e);
       }
-    } else {
-      console.warn('[Agora] Cannot send data stream: client=', !!this.client, 'streamId=', this.dataStreamId);
     }
   }
 
