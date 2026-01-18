@@ -588,14 +588,19 @@ export class AgoraManager {
     // Also send via data stream (for cross-platform with iOS)
     if (this.client && this.dataStreamId !== null) {
       try {
+        const jsonStr = JSON.stringify(message);
+        console.log('[Agora] Sending data stream message:', jsonStr);
         const encoder = new TextEncoder();
-        const data = encoder.encode(JSON.stringify(message));
+        const data = encoder.encode(jsonStr);
         // Note: sendStreamMessage exists at runtime but isn't in the TypeScript types
         const clientAny = this.client as unknown as { sendStreamMessage: (streamId: number, data: Uint8Array) => void };
         clientAny.sendStreamMessage(this.dataStreamId, data);
+        console.log('[Agora] Data stream message sent successfully');
       } catch (e) {
         console.warn('[Agora] Failed to send data stream message:', e);
       }
+    } else {
+      console.warn('[Agora] Cannot send data stream: client=', !!this.client, 'streamId=', this.dataStreamId);
     }
   }
 
