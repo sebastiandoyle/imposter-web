@@ -53,6 +53,7 @@ export class AgoraManager {
   private volumeIntervalId: number | null = null;
   private playerVolumes = new Map<number, number>();
   private dataStreamId: number | null = null;
+  private pendingMessages: { message: GameMessage; fromUid: number }[] = [];
 
   constructor() {
     // Initialize RTM manager
@@ -401,6 +402,9 @@ export class AgoraManager {
       };
       this.roomState = addPlayer(this.roomState, localPlayer);
 
+      // Process any messages that arrived before roomState was ready
+      this.processPendingMessages();
+
       // Request sync and announce join
       this.sendMessage({ type: 'requestSync' });
       this.sendMessage({
@@ -489,6 +493,9 @@ export class AgoraManager {
       };
       this.roomState = addPlayer(this.roomState, player);
 
+      // Process any messages that arrived before roomState was ready
+      this.processPendingMessages();
+
       // Announce presence
       this.sendMessage({
         type: 'playerJoined',
@@ -539,6 +546,7 @@ export class AgoraManager {
     this.isQuickMatching = false;
     this.allConnectedUIDs.clear();
     this.dataStreamId = null;
+    this.pendingMessages = [];
 
     this.emit({ type: 'disconnected' });
   }
@@ -633,7 +641,12 @@ export class AgoraManager {
   }
 
   private handleIncomingMessage(message: GameMessage, fromUid: number): void {
-    if (!this.roomState) return;
+    if (!this.roomState) {
+      // Queue messages that arrive before roomState is initialized
+      console.log('[Agora] Queueing message (roomState not ready):', message.type, 'from:', fromUid);
+      this.pendingMessages.push({ message, fromUid });
+      return;
+    }
 
     switch (message.type) {
       case 'playerJoined': {
@@ -718,10 +731,43 @@ export class AgoraManager {
 
       case 'stateSync': {
         const { stateSync } = message;
+        console.log('[Agora] Processing stateSync from:', fromUid, 'players:', JSON.stringify(stateSync.players));
+
+        // Preserve local player info when receiving sync from remote host
+        // (Remote host may have placeholder name for us since we can't send data streams)
+        let players = [...stateSync.players];
+        const localUserId = this.roomState!.localUserId;
+
+        // Find local player in the synced list
+        const localPlayerIndex = players.findIndex(p => p.id === localUserId);
+
+        if (localPlayerIndex !== -1) {
+          // Update local player's name (sync might have placeholder "Player X")
+          players[localPlayerIndex] = {
+            ...players[localPlayerIndex],
+            name: this.localPlayerName,
+            faceColorHex: this.localFaceColorHex || players[localPlayerIndex].faceColorHex,
+          };
+          console.log('[Agora] Preserved local player name:', this.localPlayerName);
+        } else {
+          // Local player not in sync list - add ourselves
+          const slot = nextAvailableSlot({ ...this.roomState!, players });
+          if (slot !== null) {
+            players.push({
+              id: localUserId,
+              slotIndex: slot,
+              name: this.localPlayerName,
+              isConnected: true,
+              faceColorHex: this.localFaceColorHex || FACE_COLORS[slot % FACE_COLORS.length],
+            });
+            console.log('[Agora] Added local player to sync:', this.localPlayerName);
+          }
+        }
+
         this.roomState = {
           ...this.roomState,
           hostUserId: stateSync.hostUserId,
-          players: stateSync.players,
+          players,
           gamePhase: stateSync.gamePhase,
           secretWord: stateSync.secretWord,
           imposterUserId: stateSync.imposterUserId,
@@ -737,6 +783,20 @@ export class AgoraManager {
         }
         break;
       }
+    }
+  }
+
+  // Process any messages that were queued before roomState was ready
+  private processPendingMessages(): void {
+    if (!this.roomState || this.pendingMessages.length === 0) return;
+
+    console.log('[Agora] Processing', this.pendingMessages.length, 'pending messages');
+    const messages = [...this.pendingMessages];
+    this.pendingMessages = [];
+
+    for (const { message, fromUid } of messages) {
+      console.log('[Agora] Processing queued message:', message.type, 'from:', fromUid);
+      this.handleIncomingMessage(message, fromUid);
     }
   }
 
