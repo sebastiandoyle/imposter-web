@@ -52,6 +52,7 @@ export class AgoraManager {
   private listeners: ((event: AgoraEvent) => void)[] = [];
   private volumeIntervalId: number | null = null;
   private playerVolumes = new Map<number, number>();
+  private dataStreamId: number | null = null;
 
   constructor() {
     // Initialize RTM manager
@@ -294,6 +295,15 @@ export class AgoraManager {
       // Publish audio track
       await this.client!.publish(this.localAudioTrack);
 
+      // Create data stream for cross-platform messaging (iOS uses data streams)
+      try {
+        const clientAny = this.client as unknown as { createDataStream: (config: { ordered: boolean; reliable: boolean }) => Promise<number> };
+        this.dataStreamId = await clientAny.createDataStream({ ordered: true, reliable: true });
+        console.log('[Agora] Created data stream with ID:', this.dataStreamId);
+      } catch (e) {
+        console.warn('[Agora] Failed to create data stream:', e);
+      }
+
       // Set up RTM for messaging
       await this.rtmManager.login(localUid);
       await this.rtmManager.subscribe(channel);
@@ -357,6 +367,15 @@ export class AgoraManager {
 
       // Publish audio track
       await this.client!.publish(this.localAudioTrack);
+
+      // Create data stream for cross-platform messaging (iOS uses data streams)
+      try {
+        const clientAny = this.client as unknown as { createDataStream: (config: { ordered: boolean; reliable: boolean }) => Promise<number> };
+        this.dataStreamId = await clientAny.createDataStream({ ordered: true, reliable: true });
+        console.log('[Agora] Created data stream with ID:', this.dataStreamId);
+      } catch (e) {
+        console.warn('[Agora] Failed to create data stream:', e);
+      }
 
       // Set up RTM for messaging
       await this.rtmManager.login(localUid);
@@ -436,6 +455,15 @@ export class AgoraManager {
 
       await this.client!.publish(this.localAudioTrack);
 
+      // Create data stream for cross-platform messaging (iOS uses data streams)
+      try {
+        const clientAny = this.client as unknown as { createDataStream: (config: { ordered: boolean; reliable: boolean }) => Promise<number> };
+        this.dataStreamId = await clientAny.createDataStream({ ordered: true, reliable: true });
+        console.log('[Agora] Created data stream with ID:', this.dataStreamId);
+      } catch (e) {
+        console.warn('[Agora] Failed to create data stream:', e);
+      }
+
       // Set up RTM for messaging
       await this.rtmManager.login(localUid);
       await this.rtmManager.subscribe(QUICK_MATCH_CHANNEL);
@@ -510,6 +538,7 @@ export class AgoraManager {
     this.isHosting = false;
     this.isQuickMatching = false;
     this.allConnectedUIDs.clear();
+    this.dataStreamId = null;
 
     this.emit({ type: 'disconnected' });
   }
@@ -569,16 +598,16 @@ export class AgoraManager {
     await this.rtmManager.publish(message);
 
     // Also send via data stream (for cross-platform with iOS)
-    // Web SDK 4.x API: sendStreamMessage(payload) - no stream ID needed
-    if (this.client) {
+    // Web SDK 4.x API: sendStreamMessage(streamId, payload)
+    if (this.client && this.dataStreamId !== null) {
       try {
         const jsonStr = JSON.stringify(message);
         console.log('[Agora] Sending data stream message:', jsonStr);
         const encoder = new TextEncoder();
         const data = encoder.encode(jsonStr);
         // TypeScript types are incomplete, but this method exists at runtime
-        const client = this.client as unknown as { sendStreamMessage: (data: Uint8Array) => Promise<void> };
-        await client.sendStreamMessage(data);
+        const client = this.client as unknown as { sendStreamMessage: (streamId: number, data: Uint8Array) => Promise<void> };
+        await client.sendStreamMessage(this.dataStreamId, data);
         console.log('[Agora] Data stream message sent successfully');
       } catch (e) {
         console.warn('[Agora] Failed to send data stream message:', e);
