@@ -138,12 +138,11 @@ export class AgoraManager {
       if (this.isQuickMatching) {
         this.allConnectedUIDs.add(uid);
         this.recalculateQuickMatchHost();
-        this.checkAutoStartQuickMatch();
       }
 
-      // For regular rooms: add placeholder player if not already known
+      // Add placeholder player for ALL modes (including Quick Match)
       // This ensures cross-platform players appear even without data stream sync
-      if (this.roomState && !this.isQuickMatching) {
+      if (this.roomState) {
         const existingPlayer = this.roomState.players.find(p => p.id === uid);
         if (!existingPlayer) {
           const slot = nextAvailableSlot(this.roomState);
@@ -166,6 +165,11 @@ export class AgoraManager {
             }
           }
         }
+      }
+
+      // Check auto-start AFTER adding the player
+      if (this.isQuickMatching) {
+        this.checkAutoStartQuickMatch();
       }
     });
 
